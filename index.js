@@ -370,5 +370,5 @@ app.get('/merchant/:merchantId/status', async (req, res) => {
   }
 });
 
-const port = process.env.PORT || 8080;
-app.listen(port, () => console.log('listening on', port));
+const functions = require("firebase-functions");
+exports.cashfreeAdapter = functions.https.onRequest(app);
