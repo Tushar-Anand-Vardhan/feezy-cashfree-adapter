@@ -58,6 +58,9 @@ async function cashfreePost(urlPath, jsonBody = {}, extraHeaders = {}) {
   }
   return data;
 }
+app.get("/", (req, res) => {
+  res.send("Cashfree adapter is live!");
+});
 
 // endpoint: create a sub-merchant under partner (server-side)
 app.post('/onboard', async (req, res) => {
