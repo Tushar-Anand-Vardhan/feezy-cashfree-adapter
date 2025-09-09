@@ -65,6 +65,7 @@ app.get("/", (req, res) => {
 // endpoint: create a sub-merchant under partner (server-side)
 app.post('/onboard', async (req, res) => {
   try {
+    console.log('PARTNER_KEY present?', PARTNER_KEY);
     const auth = await verifyFirebaseToken(req);
     const { userId, merchantInfo } = req.body;
     if (!userId || !merchantInfo) return res.status(400).json({ error: 'userId and merchantInfo required' });
