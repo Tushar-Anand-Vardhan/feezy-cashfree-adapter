@@ -11,7 +11,7 @@ const db = admin.firestore();
 
 const PARTNER_KEY = process.env.PARTNER_API_KEY; // store in Secret Manager
 const CF_ENV = (process.env.CF_ENV || 'sandbox').toLowerCase(); // 'sandbox' or 'prod'
-const API_VERSION = process.env.CF_API_VERSION || '2025-01-01';
+const API_VERSION = process.env.CF_API_VERSION || '2023-01-01'; 
 
 // base URLs
 const PARTNERS_BASE = CF_ENV === 'prod' ? 'https://api.cashfree.com/partners' : 'https://api-sandbox.cashfree.com/partners';
