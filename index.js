@@ -45,7 +45,7 @@ async function cashfreePost(urlPath, jsonBody = {}, extraHeaders = {}) {
   const headers = {
     'Content-Type': 'application/json',
     'x-api-version': API_VERSION,
-    'x-partner-api-key': PARTNER_KEY,
+    'x-partner-apikey': PARTNER_KEY,
     ...extraHeaders
   };
   const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(jsonBody) });
@@ -160,7 +160,7 @@ app.post('/mandate/create', async (req, res) => {
     const url = `${PG_BASE}/subscriptions`;
     const headers = {
       'x-api-version': API_VERSION,
-      'x-partner-api-key': PARTNER_KEY,
+      'x-partner-apikey': PARTNER_KEY,
       'x-partner-merchantid': merchantId,
       'Content-Type': 'application/json',
       'x-idempotency-key': uuidv4()
@@ -208,7 +208,7 @@ app.post('/mandate/:subscriptionId/manage', async (req, res) => {
     const url = `${PG_BASE}/subscriptions/${subscriptionId}/manage`;
     const headers = {
       'x-api-version': API_VERSION,
-      'x-partner-api-key': PARTNER_KEY,
+      'x-partner-apikey': PARTNER_KEY,
       'x-partner-merchantid': merchantId,
       'Content-Type': 'application/json'
     };
@@ -365,7 +365,7 @@ app.get('/health', (req, res) => res.send('ok'));
 app.get('/merchant/:merchantId/status', async (req, res) => {
   try {
     const url = `${PARTNERS_BASE}/merchants/${req.params.merchantId}`;
-    const headers = { 'x-partner-api-key': PARTNER_KEY, 'x-api-version': API_VERSION };
+    const headers = { 'x-partner-apikey': PARTNER_KEY, 'x-api-version': API_VERSION };
     const resp = await fetch(url, { method: 'GET', headers });
     const json = await resp.json();
     return res.json(json);
