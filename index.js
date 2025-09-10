@@ -102,8 +102,9 @@ app.post('/onboard', async (req, res) => {
 app.post('/onboard/link', async (req, res) => {
   try {
     await verifyFirebaseToken(req);
-    const { merchantId, userId, linkType } = req.body; // linkType: 'embeddable'|'standard'
+    const { merchantId, userId, linkType, returnUrl } = req.body; 
     let mId = merchantId;
+
     if (!mId && userId) {
       const udoc = await db.collection('users').doc(userId).get();
       mId = udoc.exists ? udoc.data()?.cashfree?.merchant_id : null;
@@ -112,16 +113,22 @@ app.post('/onboard/link', async (req, res) => {
 
     const endpoint = linkType === 'standard'
       ? `/merchants/${mId}/onboarding_link/standard`
-      : `/merchants/${mId}/onboarding_link`; // embeddable default
-    const cfResp = await cashfreePost(endpoint, {});
+      : `/merchants/${mId}/onboarding_link`;
 
-    // return link object to client, store it for auditing
+    const payload = {
+      type: "account_onboarding",   // required by Cashfree
+      return_url: returnUrl || "https://feezy-cashfree-adapter-1253307878.asia-south1.run.app/onboard/link/callback"
+    };
+
+    const cfResp = await cashfreePost(endpoint, payload);
+
     await db.collection('events').add({
       type: 'cashfree.onboard.link_created',
       merchantId: mId,
       cfResp,
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
+
     return res.json({ ok: true, cfResp });
   } catch (err) {
     console.error('/onboard/link error', err);
