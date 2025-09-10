@@ -129,6 +129,14 @@ app.post('/onboard/link', async (req, res) => {
   }
 });
 
+// link to which the onboarding api will re-direct
+app.get('/onboard/link/callback', async (req, res) => {
+  const { merchant_id } = req.query; // Cashfree may append params
+  // You can now hit Cashfree API to fetch merchant onboarding status
+  // Update Firestore user doc with status
+  res.send("Onboarding complete. You may close this tab.");
+});
+
 // endpoint: create subscription / UPI autopay (mandate)
 // body: { userId, merchantId, enrollmentId, amount, intervalType:'MONTH', interval:1, customer_details:{name,phone,email}, return_url }
 app.post('/mandate/create', async (req, res) => {
