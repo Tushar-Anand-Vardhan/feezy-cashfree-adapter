@@ -81,7 +81,9 @@ app.post('/onboard', async (req, res) => {
         merchant_id: merchantId,
         onboarding_status: cfResp?.data?.onboarding_status || 'CREATED',
         raw: cfResp
-      }
+      },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdAt: admin.firestore.FieldValue.serverTimestamp() // adding created and updated timestamps to users documents
     }, { merge: true });
 
     // store the raw event for audit
@@ -194,7 +196,8 @@ app.post('/mandate/create', async (req, res) => {
       cf_response: cfResp,
       merchantId, userId, enrollmentId,
       status: cfResp?.subscription_status || 'INITIALIZED',
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
     // write event
@@ -295,7 +298,8 @@ app.post('/webhook', async (req, res) => {
         'x-webhook-timestamp': req.get('x-webhook-timestamp'),
         'x-webhook-signature': req.get('x-webhook-signature')
       },
-      receivedAt: admin.firestore.FieldValue.serverTimestamp()
+      receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
     // handle merchant onboarding event
