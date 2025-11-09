@@ -4,6 +4,10 @@ const { PARTNER_KEY, WEBHOOK_TOLERANCE_SEC } = require('../config');
 
 function verifyCashfreeSignature({ headers, rawBody }) {
   try {
+    if (!PARTNER_KEY) {
+      console.error('Missing PARTNER_KEY / PARTNER_API_KEY env var for webhook verification');
+      return false; // safe failure
+    }
     const sigHeader = headers['x-webhook-signature'] || headers['x-cashfree-signature'];
     const tsHeader  = headers['x-webhook-timestamp'] || headers['x-cashfree-timestamp'];
     if (!sigHeader || !tsHeader || !rawBody) return false;

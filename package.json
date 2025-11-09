@@ -2,14 +2,24 @@
   "name": "feezy-cashfree-adapter",
   "version": "1.0.0",
   "main": "src/server.js",
-  "engines": { "node": "18" },
+  "engines": {
+    "node": "18"
+  },
   "dependencies": {
+    "axios": "^1.7.2",
     "express": "^4.18.2",
     "firebase-admin": "^12.0.0",
-    "axios": "^1.7.2",
     "uuid": "^9.0.0"
   },
   "scripts": {
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "test": "cross-env NODE_ENV=test jest --config=jest.config.js --runInBand --detectOpenHandles",
+    "test:ci": "NODE_ENV=test jest --runInBand --detectOpenHandles"
+  },
+  "devDependencies": {
+    "cross-env": "^10.1.0",
+    "dotenv": "^17.2.3",
+    "jest": "^30.2.0",
+    "supertest": "^7.1.4"
   }
 }
