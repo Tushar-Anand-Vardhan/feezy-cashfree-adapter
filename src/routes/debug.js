@@ -4,6 +4,7 @@ const router = express.Router();
 const axios = require('axios');
 const { PARTNERS_BASE, PARTNER_KEY, API_VERSION } = require('../config');
 
+router.get('/', (req, res) => res.send('ok'));
 router.get('/health', (req, res) => res.send('ok'));
 router.get('/merchant/:merchantId/status', async (req, res) => {
   try {
