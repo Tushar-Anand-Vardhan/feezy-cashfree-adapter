@@ -34,26 +34,48 @@ router.post('/link', verifyFirebaseToken, async (req, res) => {
   try {
     const { merchantId, userId, linkType, returnUrl } = req.body;
     let mId = merchantId;
+
+    // fallback lookup if merchantId not passed
     if (!mId && userId) {
       const udoc = await db.collection('users').doc(userId).get();
       mId = udoc.exists ? udoc.data()?.cashfree?.merchant_id : null;
     }
-    if (!mId) return res.status(400).json({ error: 'merchantId or userId->merchant required' });
-    const endpoint = linkType === 'standard' ? `/merchants/${mId}/onboarding_link/standard` : `/merchants/${mId}/onboarding_link`;
-    const cfResp = await cashfreePartnerPost(endpoint, updatePayload, {
-          'Content-Type': 'application/json',
-          'x-api-version': '2023-01-01'
-        });
-    const payload = { type: "account_onboarding", return_url: returnUrl || "https://feezy-cashfree-adapter-1253307878.asia-south1.run.app/onboard/link/callback" };
-    cfResp = await cashfreePartnerPost(endpoint, payload);
+    if (!mId) {
+      return res.status(400).json({ error: 'merchantId or userId->merchant required' });
+    }
 
+    // declare endpoint first
+    const endpoint =
+      linkType === 'standard'
+        ? `/merchants/${mId}/onboarding_link/standard`
+        : `/merchants/${mId}/onboarding_link`;
+
+    // define correct payload
+    const payload = {
+      type: 'account_onboarding',
+      return_url:
+        returnUrl ||
+        'https://feezy-cashfree-adapter-1253307878.asia-south1.run.app/onboard/link/callback'
+    };
+
+    // make single API call — no updatePayload, no duplicate
+    const cfResp = await cashfreePartnerPost(endpoint, payload, {
+      'Content-Type': 'application/json',
+      'x-api-version': '2023-01-01'
+    });
+
+    // log and respond
     await logEvent('cashfree.onboard.link_created', { merchantId: mId, cfResp });
     return res.json({ ok: true, cfResp });
   } catch (err) {
-    console.error('/onboard/link error', err);
-    return res.status(err.status || 500).json({ error: err.message || err.body || err });
+    console.error('/onboard/link error', err.response?.data || err);
+    return res.status(err.status || 500).json({
+      error: err.message || 'Cashfree link creation failed',
+      body: err.response?.data || err.body || null
+    });
   }
 });
+
 
 // PATCH /onboard  (merchantId passed in body)
 router.patch('/', verifyFirebaseToken, async (req, res) => {
