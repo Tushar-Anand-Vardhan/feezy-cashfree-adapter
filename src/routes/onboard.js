@@ -39,10 +39,13 @@ router.post('/link', verifyFirebaseToken, async (req, res) => {
       mId = udoc.exists ? udoc.data()?.cashfree?.merchant_id : null;
     }
     if (!mId) return res.status(400).json({ error: 'merchantId or userId->merchant required' });
-
+    const cfResp = await cashfreePartnerPost(endpoint, updatePayload, {
+          'Content-Type': 'application/json',
+          'x-api-version': '2023-01-01'
+        });
     const endpoint = linkType === 'standard' ? `/merchants/${mId}/onboarding_link/standard` : `/merchants/${mId}/onboarding_link`;
     const payload = { type: "account_onboarding", return_url: returnUrl || "https://feezy-cashfree-adapter-1253307878.asia-south1.run.app/onboard/link/callback" };
-    const cfResp = await cashfreePartnerPost(endpoint, payload);
+    cfResp = await cashfreePartnerPost(endpoint, payload);
 
     await logEvent('cashfree.onboard.link_created', { merchantId: mId, cfResp });
     return res.json({ ok: true, cfResp });
