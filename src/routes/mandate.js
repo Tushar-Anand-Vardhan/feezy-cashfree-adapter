@@ -17,7 +17,7 @@ router.post('/create', verifyFirebaseToken, async (req, res) => {
       amount,
       intervalType = 'MONTH',
       interval = 1,
-      customer_details = {},
+      enrollment_details = {},
       return_url,
       plan_id
     } = req.body;
@@ -27,9 +27,9 @@ router.post('/create', verifyFirebaseToken, async (req, res) => {
       return res.status(400).json({ error: 'missing required params' });
     }
 
-    if (!customer_details.customer_email || !customer_details.customer_phone) {
+    if (!enrollment_details.enrollment_email || !enrollment_details.enrollment_phone) {
       return res.status(400).json({
-        error: 'customer_email and customer_phone are required'
+        error: 'enrollment_email and enrollment_phone are required'
       });
     }
 
@@ -38,7 +38,7 @@ router.post('/create', verifyFirebaseToken, async (req, res) => {
     // ---- Build Cashfree payload (SPEC COMPLIANT) ----
     const payload = {
       subscription_id: localId,
-      customer_details,
+      enrollment_details,
       authorization_details: {
         authorization_amount: 0,
         authorization_amount_refund: false,
@@ -199,6 +199,143 @@ router.post('/:subscriptionId/manage', verifyFirebaseToken, async (req, res) => 
     return res.json({ ok: true, subscriptionId, status: statusVal });
   } catch (err) {
     console.error('/mandate/manage error', err);
+    return res.status(err.status || 500).json({
+      error: err.message || String(err)
+    });
+  }
+});
+
+// POST /mandate/create-and-auth
+router.post('/create-and-auth', verifyFirebaseToken, async (req, res) => {
+  try {
+    const {
+      userId,
+      merchantId,
+      enrollmentId,
+      amount,
+      intervalType = 'MONTH',
+      interval = 1,
+      enrollment_details = {},
+      return_url
+    } = req.body;
+
+    // ---- Basic validations ----
+    if (!merchantId || !userId || !enrollmentId || !amount) {
+      return res.status(400).json({ error: 'missing required params' });
+    }
+
+    if (!enrollment_details.enrollment_email || !enrollment_details.enrollment_phone) {
+      return res.status(400).json({
+        error: 'enrollment_email and enrollment_phone are required'
+      });
+    }
+
+    const localId = subLocalId();
+
+    // ---- STEP 1: Create Subscription ----
+    const subscriptionPayload = {
+      subscription_id: localId,
+      enrollment_details,
+      authorization_details: {
+        authorization_amount: 0,
+        authorization_amount_refund: false,
+        payment_methods: ['upi']
+      },
+      subscription_meta: {
+        return_url: return_url || ''
+      },
+      plan_details: {
+        plan_type: 'PERIODIC',
+        plan_amount: amount,
+        plan_currency: 'INR',
+        plan_intervals: interval,
+        plan_interval_type: intervalType
+      }
+    };
+
+    const requestId = uuid();
+
+    const subResp = await createCashfreeSubscription(
+      merchantId,
+      subscriptionPayload,
+      requestId
+    );
+
+    const subData = subResp?.data || subResp || {};
+    const subscriptionId = subData.subscription_id;
+    const cfSubscriptionId = subData.cf_subscription_id || null;
+    const sessionId = subData.subscription_session_id;
+
+    if (!subscriptionId || !sessionId) {
+      throw new Error('Failed to create subscription session');
+    }
+
+    // Persist mandate immediately
+    const mandateDocId = await persistMandateRecord({
+      localId,
+      merchantSubId: subscriptionId,
+      cfSubId: cfSubscriptionId,
+      merchantId,
+      userId,
+      enrollmentId,
+      status: subData.subscription_status || 'INITIALIZED',
+      cfResp: subResp
+    });
+
+    // ---- STEP 2: Create AUTH payment (Raise Auth) ----
+    const axios = require('axios');
+    const { PARTNER_KEY, API_VERSION } = require('../config');
+
+    const authPaymentPayload = {
+      subscription_id: subscriptionId,
+      subscription_session_id: sessionId,
+      payment_id: `AUTH_${uuid()}`,
+      payment_type: 'AUTH',
+      payment_method: {
+        upi: {
+          channel: 'link'
+        }
+      }
+    };
+
+    const headers = {
+      'x-api-version': API_VERSION || '2025-01-01',
+      'x-idempotency-key': uuid(),
+      'x-partner-apikey': PARTNER_KEY,
+      'x-partner-merchantid': merchantId,
+      'Content-Type': 'application/json'
+    };
+
+    const payResp = await axios.post(
+      `${process.env.PG_BASE || 'https://sandbox.cashfree.com/pg'}/subscriptions/pay`,
+      authPaymentPayload,
+      { headers }
+    );
+
+    const payData = payResp.data || {};
+
+    // ---- Extract hosted checkout URL (THIS is what goes on WhatsApp) ----
+    const authUrl =
+      payData?.data?.url ||
+      'https://payments.cashfree.com/subscriptions/checkout/timer';
+
+    await logEvent('cashfree.mandate.auth_created', {
+      mandateDocId,
+      subscriptionId,
+      merchantId,
+      payment_id: authPaymentPayload.payment_id
+    });
+
+    // ---- Final clean response ----
+    return res.json({
+      ok: true,
+      subscription_id: subscriptionId,
+      cf_subscription_id: cfSubscriptionId,
+      auth_url: authUrl,
+      payment_status: payData.payment_status || 'PENDING'
+    });
+  } catch (err) {
+    console.error('/mandate/create-and-auth error', err);
     return res.status(err.status || 500).json({
       error: err.message || String(err)
     });
