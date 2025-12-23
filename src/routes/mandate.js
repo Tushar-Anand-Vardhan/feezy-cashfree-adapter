@@ -6,8 +6,15 @@ const { createCashfreeSubscription } = require('../cashfree/subscriptionService'
 const { persistMandateRecord } = require('../services/mandateService');
 const { uuid, subLocalId } = require('../utils/id');
 const { logEvent } = require('../services/eventService');
+const axios = require('axios');
+const { PARTNER_KEY, API_VERSION } = require('../config');
 
-// POST /mandate/create
+/**
+ * ----------------------------------------
+ * POST /mandate/create
+ * Creates ONLY the subscription (mandate)
+ * ----------------------------------------
+ */
 router.post('/create', verifyFirebaseToken, async (req, res) => {
   try {
     const {
@@ -17,28 +24,36 @@ router.post('/create', verifyFirebaseToken, async (req, res) => {
       amount,
       intervalType = 'MONTH',
       interval = 1,
-      enrollment_details = {},
+      customer_details = {},
       return_url,
       plan_id
     } = req.body;
 
-    // ---- Required validations (aligned with Cashfree spec) ----
-    if (!merchantId || !userId || !enrollmentId || (!amount && !plan_id)) {
-      return res.status(400).json({ error: 'missing required params' });
+    // ---- Strict validations ----
+    if (!merchantId || !userId || !enrollmentId) {
+      return res.status(400).json({ error: 'merchantId, userId, enrollmentId required' });
     }
 
-    if (!enrollment_details.enrollment_email || !enrollment_details.enrollment_phone) {
+    if (!plan_id && (!amount || amount <= 0)) {
+      return res.status(400).json({ error: 'amount must be > 0' });
+    }
+
+    if (!customer_details.customer_phone || !customer_details.customer_email) {
       return res.status(400).json({
-        error: 'enrollment_email and enrollment_phone are required'
+        error: 'customer_email and customer_phone are required'
       });
     }
 
     const localId = subLocalId();
 
-    // ---- Build Cashfree payload (SPEC COMPLIANT) ----
+    // ---- Build Cashfree-compliant payload ----
     const payload = {
       subscription_id: localId,
-      enrollment_details,
+      customer_details: {
+        customer_name: customer_details.customer_name || 'Customer',
+        customer_email: customer_details.customer_email,
+        customer_phone: customer_details.customer_phone
+      },
       authorization_details: {
         authorization_amount: 0,
         authorization_amount_refund: false,
@@ -49,41 +64,34 @@ router.post('/create', verifyFirebaseToken, async (req, res) => {
       }
     };
 
-    // Plan handling (FIXED)
     if (plan_id) {
-      payload.plan_details = {
-        plan_id
-      };
+      payload.plan_details = { plan_id };
     } else {
       payload.plan_details = {
         plan_type: 'PERIODIC',
         plan_amount: amount,
         plan_currency: 'INR',
-        plan_intervals: interval,
-        plan_interval_type: intervalType
+        plan_intervals: interval || 1,
+        plan_interval_type: intervalType.toUpperCase()
       };
     }
 
-    // ---- Call Cashfree ----
-    const requestId = uuid();
     const cfResp = await createCashfreeSubscription(
       merchantId,
       payload,
-      requestId
+      uuid()
     );
 
-    // ---- Normalize Cashfree response ----
-    const data = cfResp?.data || cfResp || {};
-    const merchantSubId = data.subscription_id || localId;
-    const cfSubId = data.cf_subscription_id || null;
+    const data = cfResp?.data || cfResp;
+    const subscriptionId = data.subscription_id;
+    const cfSubscriptionId = data.cf_subscription_id || null;
     const status = data.subscription_status || 'INITIALIZED';
     const sessionId = data.subscription_session_id || null;
 
-    // ---- Persist mandate ----
-    const docId = await persistMandateRecord({
+    await persistMandateRecord({
       localId,
-      merchantSubId,
-      cfSubId,
+      merchantSubId: subscriptionId,
+      cfSubId: cfSubscriptionId,
       merchantId,
       userId,
       enrollmentId,
@@ -92,120 +100,32 @@ router.post('/create', verifyFirebaseToken, async (req, res) => {
     });
 
     await logEvent('cashfree.mandate.created', {
-      subscriptionId: docId,
+      subscriptionId,
       merchantId,
-      userId,
-      status
+      userId
     });
 
-    // ---- Clean response to frontend ----
     return res.json({
       ok: true,
-      subscription_id: merchantSubId,
-      cf_subscription_id: cfSubId,
+      subscription_id: subscriptionId,
+      cf_subscription_id: cfSubscriptionId,
       subscription_session_id: sessionId,
       status
     });
   } catch (err) {
     console.error('/mandate/create error', err);
     return res.status(err.status || 500).json({
-      error: err.message || err.body || String(err)
-    });
-  }
-});
-
-// POST /mandate/:subscriptionId/manage
-router.post('/:subscriptionId/manage', verifyFirebaseToken, async (req, res) => {
-  try {
-    const { subscriptionId } = req.params;
-    const { merchantId, action } = req.body;
-
-    if (!merchantId || !action) {
-      return res.status(400).json({
-        error: 'merchantId and action required'
-      });
-    }
-
-    const axios = require('axios');
-    const { PARTNER_KEY, API_VERSION } = require('../config');
-
-    const headers = {
-      'x-api-version': API_VERSION,
-      'x-partner-apikey': PARTNER_KEY,
-      'x-partner-merchantid': merchantId,
-      'Content-Type': 'application/json'
-    };
-
-    const resp = await axios.post(
-      `${process.env.PG_BASE || 'https://sandbox.cashfree.com/pg'}/subscriptions/${subscriptionId}/manage`,
-      { action },
-      { headers }
-    );
-
-    const cfResp = resp.data;
-    const statusVal = action === 'CANCEL' ? 'CANCELLED' : action;
-
-    const { db } = require('../firebaseClient');
-
-    // ---- Update mandate record (existing-safe logic) ----
-    const direct = await db.collection('mandates').doc(subscriptionId).get();
-    if (direct.exists) {
-      await direct.ref.set(
-        { status: statusVal, lastCfResponse: cfResp, updatedAt: new Date() },
-        { merge: true }
-      );
-    } else {
-      const q = await db
-        .collection('mandates')
-        .where('subscription_id', '==', subscriptionId)
-        .limit(1)
-        .get();
-
-      if (!q.empty) {
-        await q.docs[0].ref.set(
-          { status: statusVal, lastCfResponse: cfResp, updatedAt: new Date() },
-          { merge: true }
-        );
-      } else {
-        const q2 = await db
-          .collection('mandates')
-          .where('cf_subscription_id', '==', subscriptionId)
-          .limit(1)
-          .get();
-
-        if (!q2.empty) {
-          await q2.docs[0].ref.set(
-            { status: statusVal, lastCfResponse: cfResp, updatedAt: new Date() },
-            { merge: true }
-          );
-        } else {
-          await db.collection('mandates').doc(subscriptionId).set({
-            subscription_id: subscriptionId,
-            status: statusVal,
-            lastCfResponse: cfResp,
-            createdAt: new Date(),
-            updatedAt: new Date()
-          });
-        }
-      }
-    }
-
-    await logEvent('cashfree.mandate.manage', {
-      subscriptionId,
-      merchantId,
-      action
-    });
-
-    return res.json({ ok: true, subscriptionId, status: statusVal });
-  } catch (err) {
-    console.error('/mandate/manage error', err);
-    return res.status(err.status || 500).json({
       error: err.message || String(err)
     });
   }
 });
 
-// POST /mandate/create-and-auth
+/**
+ * ----------------------------------------
+ * POST /mandate/create-and-auth
+ * Creates mandate + generates UPI link
+ * ----------------------------------------
+ */
 router.post('/create-and-auth', verifyFirebaseToken, async (req, res) => {
   try {
     const {
@@ -215,27 +135,34 @@ router.post('/create-and-auth', verifyFirebaseToken, async (req, res) => {
       amount,
       intervalType = 'MONTH',
       interval = 1,
-      enrollment_details = {},
+      customer_details = {},
       return_url
     } = req.body;
 
-    // ---- Basic validations ----
-    if (!merchantId || !userId || !enrollmentId || !amount) {
-      return res.status(400).json({ error: 'missing required params' });
+    if (!merchantId || !userId || !enrollmentId) {
+      return res.status(400).json({ error: 'merchantId, userId, enrollmentId required' });
     }
 
-    if (!enrollment_details.enrollment_email || !enrollment_details.enrollment_phone) {
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: 'amount must be > 0' });
+    }
+
+    if (!customer_details.customer_email || !customer_details.customer_phone) {
       return res.status(400).json({
-        error: 'enrollment_email and enrollment_phone are required'
+        error: 'customer_email and customer_phone required'
       });
     }
 
     const localId = subLocalId();
 
-    // ---- STEP 1: Create Subscription ----
+    // ---- STEP 1: Create subscription ----
     const subscriptionPayload = {
       subscription_id: localId,
-      enrollment_details,
+      customer_details: {
+        customer_name: customer_details.customer_name || 'Customer',
+        customer_email: customer_details.customer_email,
+        customer_phone: customer_details.customer_phone
+      },
       authorization_details: {
         authorization_amount: 0,
         authorization_amount_refund: false,
@@ -248,29 +175,26 @@ router.post('/create-and-auth', verifyFirebaseToken, async (req, res) => {
         plan_type: 'PERIODIC',
         plan_amount: amount,
         plan_currency: 'INR',
-        plan_intervals: interval,
-        plan_interval_type: intervalType
+        plan_intervals: interval || 1,
+        plan_interval_type: intervalType.toUpperCase()
       }
     };
-
-    const requestId = uuid();
 
     const subResp = await createCashfreeSubscription(
       merchantId,
       subscriptionPayload,
-      requestId
+      uuid()
     );
 
-    const subData = subResp?.data || subResp || {};
+    const subData = subResp?.data || subResp;
     const subscriptionId = subData.subscription_id;
     const cfSubscriptionId = subData.cf_subscription_id || null;
     const sessionId = subData.subscription_session_id;
 
     if (!subscriptionId || !sessionId) {
-      throw new Error('Failed to create subscription session');
+      throw new Error('Subscription session not created');
     }
 
-    // Persist mandate immediately
     const mandateDocId = await persistMandateRecord({
       localId,
       merchantSubId: subscriptionId,
@@ -282,39 +206,33 @@ router.post('/create-and-auth', verifyFirebaseToken, async (req, res) => {
       cfResp: subResp
     });
 
-    // ---- STEP 2: Create AUTH payment (Raise Auth) ----
-    const axios = require('axios');
-    const { PARTNER_KEY, API_VERSION } = require('../config');
-
-    const authPaymentPayload = {
+    // ---- STEP 2: Raise AUTH (generate UPI link) ----
+    const authPayload = {
       subscription_id: subscriptionId,
       subscription_session_id: sessionId,
       payment_id: `AUTH_${uuid()}`,
       payment_type: 'AUTH',
       payment_method: {
-        upi: {
-          channel: 'link'
-        }
+        upi: { channel: 'link' }
       }
     };
 
     const headers = {
       'x-api-version': API_VERSION || '2025-01-01',
-      'x-idempotency-key': uuid(),
       'x-partner-apikey': PARTNER_KEY,
       'x-partner-merchantid': merchantId,
+      'x-idempotency-key': uuid(),
       'Content-Type': 'application/json'
     };
 
     const payResp = await axios.post(
       `${process.env.PG_BASE || 'https://sandbox.cashfree.com/pg'}/subscriptions/pay`,
-      authPaymentPayload,
+      authPayload,
       { headers }
     );
 
-    const payData = payResp.data || {};
+    const payData = payResp.data;
 
-    // ---- Extract hosted checkout URL (THIS is what goes on WhatsApp) ----
     const authUrl =
       payData?.data?.url ||
       'https://payments.cashfree.com/subscriptions/checkout/timer';
@@ -322,11 +240,9 @@ router.post('/create-and-auth', verifyFirebaseToken, async (req, res) => {
     await logEvent('cashfree.mandate.auth_created', {
       mandateDocId,
       subscriptionId,
-      merchantId,
-      payment_id: authPaymentPayload.payment_id
+      merchantId
     });
 
-    // ---- Final clean response ----
     return res.json({
       ok: true,
       subscription_id: subscriptionId,
@@ -336,6 +252,52 @@ router.post('/create-and-auth', verifyFirebaseToken, async (req, res) => {
     });
   } catch (err) {
     console.error('/mandate/create-and-auth error', err);
+    return res.status(err.status || 500).json({
+      error: err.message || String(err)
+    });
+  }
+});
+
+/**
+ * ----------------------------------------
+ * POST /mandate/:subscriptionId/manage
+ * ----------------------------------------
+ */
+router.post('/:subscriptionId/manage', verifyFirebaseToken, async (req, res) => {
+  try {
+    const { subscriptionId } = req.params;
+    const { merchantId, action } = req.body;
+
+    if (!merchantId || !action) {
+      return res.status(400).json({ error: 'merchantId and action required' });
+    }
+
+    const resp = await axios.post(
+      `${process.env.PG_BASE || 'https://sandbox.cashfree.com/pg'}/subscriptions/${subscriptionId}/manage`,
+      { action },
+      {
+        headers: {
+          'x-api-version': API_VERSION,
+          'x-partner-apikey': PARTNER_KEY,
+          'x-partner-merchantid': merchantId,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    await logEvent('cashfree.mandate.manage', {
+      subscriptionId,
+      merchantId,
+      action
+    });
+
+    return res.json({
+      ok: true,
+      subscriptionId,
+      status: action === 'CANCEL' ? 'CANCELLED' : action
+    });
+  } catch (err) {
+    console.error('/mandate/manage error', err);
     return res.status(err.status || 500).json({
       error: err.message || String(err)
     });
