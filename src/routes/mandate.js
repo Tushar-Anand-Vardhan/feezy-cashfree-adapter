@@ -139,23 +139,30 @@ router.post('/create-and-auth', verifyFirebaseToken, async (req, res) => {
       return_url
     } = req.body;
 
+    // ---------------- VALIDATION ----------------
     if (!merchantId || !userId || !enrollmentId) {
-      return res.status(400).json({ error: 'merchantId, userId, enrollmentId required' });
+      return res.status(400).json({
+        error: 'merchantId, userId, enrollmentId required'
+      });
     }
 
     if (!amount || amount <= 0) {
-      return res.status(400).json({ error: 'amount must be > 0' });
+      return res.status(400).json({
+        error: 'amount must be > 0'
+      });
     }
 
-    if (!customer_details.customer_email || !customer_details.customer_phone) {
+    if (!customer_details.customer_phone || !customer_details.customer_email) {
       return res.status(400).json({
         error: 'customer_email and customer_phone required'
       });
     }
 
     const localId = subLocalId();
+    const API_VER = API_VERSION || '2025-01-01';
+    const PG_BASE = process.env.PG_BASE || 'https://sandbox.cashfree.com/pg';
 
-    // ---- STEP 1: Create subscription ----
+    // ---------------- STEP 1: CREATE SUBSCRIPTION ----------------
     const subscriptionPayload = {
       subscription_id: localId,
       customer_details: {
@@ -206,7 +213,7 @@ router.post('/create-and-auth', verifyFirebaseToken, async (req, res) => {
       cfResp: subResp
     });
 
-    // ---- STEP 2: Raise AUTH (generate UPI link) ----
+    // ---------------- STEP 2: CREATE AUTH ----------------
     const authPayload = {
       subscription_id: subscriptionId,
       subscription_session_id: sessionId,
@@ -218,18 +225,31 @@ router.post('/create-and-auth', verifyFirebaseToken, async (req, res) => {
     };
 
     const headers = {
-      'x-api-version': API_VERSION || '2025-01-01',
+      'x-api-version': API_VER,
       'x-partner-apikey': PARTNER_KEY,
       'x-partner-merchantid': merchantId,
       'x-idempotency-key': uuid(),
       'Content-Type': 'application/json'
     };
 
-    const payResp = await axios.post(
-      `${process.env.PG_BASE || 'https://sandbox.cashfree.com/pg'}/subscriptions/pay`,
-      authPayload,
-      { headers }
-    );
+    let payResp;
+    try {
+      payResp = await axios.post(
+        `${PG_BASE}/subscriptions/pay`,
+        authPayload,
+        { headers }
+      );
+    } catch (cfErr) {
+      console.error('Cashfree AUTH failed', {
+        status: cfErr?.response?.status,
+        data: cfErr?.response?.data
+      });
+      return res.status(502).json({
+        error: 'cashfree_auth_failed',
+        cf_status: cfErr?.response?.status,
+        cf_error: cfErr?.response?.data
+      });
+    }
 
     const payData = payResp.data;
 
@@ -240,7 +260,8 @@ router.post('/create-and-auth', verifyFirebaseToken, async (req, res) => {
     await logEvent('cashfree.mandate.auth_created', {
       mandateDocId,
       subscriptionId,
-      merchantId
+      merchantId,
+      payment_id: authPayload.payment_id
     });
 
     return res.json({
@@ -257,6 +278,7 @@ router.post('/create-and-auth', verifyFirebaseToken, async (req, res) => {
     });
   }
 });
+
 
 /**
  * ----------------------------------------
