@@ -14,7 +14,7 @@ async function cashfreePartnerPost(path, body = {}, extraHeaders = {}) {
 async function createCashfreeSubscription(merchantId, payload, idempotencyKey) {
   const url = `${PG_BASE}/subscriptions`;
   const headers = {
-    'x-api-version': axiosInstance.defaults.headers['x-api-version'],
+    'x-api-version': '2025-01-01',
     'x-partner-apikey': PARTNER_KEY,
     'x-partner-merchantid': merchantId,
     'x-idempotency-key': idempotencyKey

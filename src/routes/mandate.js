@@ -1,327 +1,284 @@
 const express = require('express');
 const router = express.Router();
+const axios = require('axios');
+const { FieldValue, db } = require('../firebaseClient');
 
 const { verifyFirebaseToken } = require('../middleware/auth');
 const { createCashfreeSubscription } = require('../cashfree/subscriptionService');
-const { persistMandateRecord } = require('../services/mandateService');
-const { uuid, subLocalId } = require('../utils/id');
-const { logEvent } = require('../services/eventService');
-const axios = require('axios');
-const { PARTNER_KEY, API_VERSION } = require('../config');
+const { PARTNER_KEY } = require('../config');
+
+const PG_BASE = process.env.PG_BASE || 'https://sandbox.cashfree.com/pg';
 
 /**
- * ----------------------------------------
+ * ------------------------------------------------
  * POST /mandate/create
- * Creates ONLY the subscription (mandate)
- * ----------------------------------------
+ * Creates subscription container ONLY
+ * ------------------------------------------------
  */
 router.post('/create', verifyFirebaseToken, async (req, res) => {
   try {
     const {
-      userId,
-      merchantId,
       enrollmentId,
-      amount,
-      intervalType = 'MONTH',
-      interval = 1,
-      customer_details = {},
-      return_url,
-      plan_id
+      customer,
+      plan,
+      subscription_first_charge_time,
+      subscription_expiry_time,
+      return_url
     } = req.body;
 
-    // ---- Strict validations ----
-    if (!merchantId || !userId || !enrollmentId) {
-      return res.status(400).json({ error: 'merchantId, userId, enrollmentId required' });
+    const merchantId = req.user.merchant_id;
+
+    // -------------------------
+    // Hard validations
+    // -------------------------
+    if (!enrollmentId) {
+      return res.status(400).json({ error: 'enrollmentId is required' });
     }
 
-    if (!plan_id && (!amount || amount <= 0)) {
-      return res.status(400).json({ error: 'amount must be > 0' });
+    if (!merchantId) {
+      return res.status(403).json({ error: 'merchant not authorized' });
     }
 
-    if (!customer_details.customer_phone || !customer_details.customer_email) {
+    if (!customer?.name || !customer?.email || !customer?.phone) {
+      return res.status(400).json({ error: 'customer name, email, phone required' });
+    }
+
+    if (!plan?.plan_type || !plan?.plan_amount) {
+      return res.status(400).json({ error: 'plan_type and plan_amount required' });
+    }
+
+    if (!subscription_first_charge_time) {
       return res.status(400).json({
-        error: 'customer_email and customer_phone are required'
+        error: 'subscription_first_charge_time is required'
       });
     }
 
-    const localId = subLocalId();
+    const mandateId = `mandate_${enrollmentId}`;
+    const mandateRef = db.collection('mandates').doc(mandateId);
+    const existingSnap = await mandateRef.get();
 
-    // ---- Build Cashfree-compliant payload ----
+    // -------------------------
+    // Issue #2: Mandate existence guard
+    // -------------------------
+    if (existingSnap.exists && existingSnap.data().cf_subscription_id) {
+      return res.status(409).json({
+        error: 'Mandate already exists'
+      });
+    }
+
+    // -------------------------
+    // Cashfree payload
+    // -------------------------
     const payload = {
-      subscription_id: localId,
+      subscription_id: mandateId,
+
       customer_details: {
-        customer_name: customer_details.customer_name || 'Customer',
-        customer_email: customer_details.customer_email,
-        customer_phone: customer_details.customer_phone
+        customer_name: customer.name,
+        customer_email: customer.email,
+        customer_phone: customer.phone
       },
+
+      plan_details: {
+        plan_type: plan.plan_type,
+        plan_currency: 'INR',
+        plan_amount: plan.plan_amount,
+        plan_intervals: plan.plan_interval ?? 1,
+        plan_interval_type: plan.plan_interval_type
+      },
+
       authorization_details: {
         authorization_amount: 0,
         authorization_amount_refund: false,
         payment_methods: ['upi']
       },
+
       subscription_meta: {
-        return_url: return_url || ''
-      }
+        return_url
+      },
+
+      subscription_expiry_time,
+      subscription_first_charge_time
     };
 
-    if (plan_id) {
-      payload.plan_details = { plan_id };
-    } else {
-      payload.plan_details = {
-        plan_type: 'PERIODIC',
-        plan_amount: amount,
-        plan_currency: 'INR',
-        plan_intervals: interval || 1,
-        plan_interval_type: intervalType.toUpperCase()
-      };
-    }
-
-    const cfResp = await createCashfreeSubscription(
+    // -------------------------
+    // Call Cashfree
+    // -------------------------
+    const data = await createCashfreeSubscription(
       merchantId,
       payload,
-      uuid()
+      mandateId // idempotency key
     );
 
-    const data = cfResp?.data || cfResp;
-    const subscriptionId = data.subscription_id;
-    const cfSubscriptionId = data.cf_subscription_id || null;
-    const status = data.subscription_status || 'INITIALIZED';
-    const sessionId = data.subscription_session_id || null;
+    // -------------------------
+    // Issue #5: created_at only once
+    // -------------------------
+    const baseUpdate = {
+      mandate_id: mandateId,
+      enrollment_id: enrollmentId,
+      merchant_id: merchantId,
 
-    await persistMandateRecord({
-      localId,
-      merchantSubId: subscriptionId,
-      cfSubId: cfSubscriptionId,
-      merchantId,
-      userId,
-      enrollmentId,
-      status,
-      cfResp
-    });
+      cf_subscription_id: data.cf_subscription_id,
+      subscription_session_id: data.subscription_session_id,
 
-    await logEvent('cashfree.mandate.created', {
-      subscriptionId,
-      merchantId,
-      userId
-    });
+      subscription_status: data.subscription_status,
+      next_schedule_date: data.next_schedule_date || null,
+      subscription_first_charge_time: data.subscription_first_charge_time || null,
 
+      raw_cf_response: data,
+      updated_at: FieldValue.serverTimestamp()
+    };
+
+    if (!existingSnap.exists) {
+      baseUpdate.created_at = FieldValue.serverTimestamp();
+    }
+
+    await mandateRef.set(baseUpdate, { merge: true });
+
+    // -------------------------
+    // API response
+    // -------------------------
     return res.json({
-      ok: true,
-      subscription_id: subscriptionId,
-      cf_subscription_id: cfSubscriptionId,
-      subscription_session_id: sessionId,
-      status
+      mandate_id: mandateId,
+      cf_subscription_id: data.cf_subscription_id,
+      subscription_session_id: data.subscription_session_id,
+      subscription_status: data.subscription_status,
+      next_schedule_date: data.next_schedule_date,
+      subscription_first_charge_time: data.subscription_first_charge_time
     });
+
   } catch (err) {
-    console.error('/mandate/create error', err);
-    return res.status(err.status || 500).json({
-      error: err.message || String(err)
+    console.error('Create Subscription Error:', err?.response?.data || err);
+    return res.status(500).json({
+      error: 'Failed to create subscription',
+      details: err?.response?.data || err.message
     });
   }
 });
 
 /**
- * ----------------------------------------
- * POST /mandate/create-and-auth
- * Creates mandate + generates UPI link
- * ----------------------------------------
+ * ------------------------------------------------
+ * POST /mandate/auth
+ * Creates AUTH (UPI Autopay approval)
+ * ------------------------------------------------
  */
-router.post('/create-and-auth', verifyFirebaseToken, async (req, res) => {
+router.post('/auth', verifyFirebaseToken, async (req, res) => {
   try {
-    const {
-      userId,
-      merchantId,
-      enrollmentId,
-      amount,
-      intervalType = 'MONTH',
-      interval = 1,
-      customer_details = {},
-      return_url
-    } = req.body;
+    const { enrollmentId, payment_method } = req.body;
+    const merchantId = req.user.merchant_id;
 
-    // ---------------- VALIDATION ----------------
-    if (!merchantId || !userId || !enrollmentId) {
-      return res.status(400).json({
-        error: 'merchantId, userId, enrollmentId required'
+    if (!enrollmentId) {
+      return res.status(400).json({ error: 'enrollmentId is required' });
+    }
+
+    const mandateId = `mandate_${enrollmentId}`;
+    const mandateRef = db.collection('mandates').doc(mandateId);
+    const mandateSnap = await mandateRef.get();
+
+    if (!mandateSnap.exists) {
+      return res.status(404).json({ error: 'mandate not found' });
+    }
+
+    const mandate = mandateSnap.data();
+
+    // -------------------------
+    // Tenant safety
+    // -------------------------
+    if (mandate.merchant_id !== merchantId) {
+      return res.status(403).json({ error: 'unauthorized mandate access' });
+    }
+
+    // -------------------------
+    // Issue #4 guard (strengthened)
+    // -------------------------
+    if (
+      mandate.payment_status === 'SUCCESS' ||
+      mandate.subscription_status === 'ACTIVE'
+    ) {
+      return res.status(409).json({
+        error: 'Mandate already authorized'
       });
     }
 
-    if (!amount || amount <= 0) {
+    if (!mandate.subscription_session_id) {
       return res.status(400).json({
-        error: 'amount must be > 0'
+        error: 'subscription session not initialized'
       });
     }
 
-    if (!customer_details.customer_phone || !customer_details.customer_email) {
+    if (!mandate.subscription_first_charge_time) {
       return res.status(400).json({
-        error: 'customer_email and customer_phone required'
+        error: 'subscription_first_charge_time missing for auth'
       });
     }
 
-    const localId = subLocalId();
-    const API_VER = API_VERSION || '2025-01-01';
-    const PG_BASE = process.env.PG_BASE || 'https://sandbox.cashfree.com/pg';
+    const authPaymentId = `auth_${enrollmentId}`;
 
-    // ---------------- STEP 1: CREATE SUBSCRIPTION ----------------
-    const subscriptionPayload = {
-      subscription_id: localId,
-      customer_details: {
-        customer_name: customer_details.customer_name || 'Customer',
-        customer_email: customer_details.customer_email,
-        customer_phone: customer_details.customer_phone
-      },
-      authorization_details: {
-        authorization_amount: 0,
-        authorization_amount_refund: false,
-        payment_methods: ['upi']
-      },
-      subscription_meta: {
-        return_url: return_url || ''
-      },
-      plan_details: {
-        plan_type: 'PERIODIC',
-        plan_amount: amount,
-        plan_currency: 'INR',
-        plan_intervals: interval || 1,
-        plan_interval_type: intervalType.toUpperCase()
-      }
-    };
-
-    const subResp = await createCashfreeSubscription(
-      merchantId,
-      subscriptionPayload,
-      uuid()
-    );
-
-    const subData = subResp?.data || subResp;
-    const subscriptionId = subData.subscription_id;
-    const cfSubscriptionId = subData.cf_subscription_id || null;
-    const sessionId = subData.subscription_session_id;
-
-    if (!subscriptionId || !sessionId) {
-      throw new Error('Subscription session not created');
-    }
-
-    const mandateDocId = await persistMandateRecord({
-      localId,
-      merchantSubId: subscriptionId,
-      cfSubId: cfSubscriptionId,
-      merchantId,
-      userId,
-      enrollmentId,
-      status: subData.subscription_status || 'INITIALIZED',
-      cfResp: subResp
-    });
-
-    // ---------------- STEP 2: CREATE AUTH ----------------
-    const authPayload = {
-      subscription_id: subscriptionId,
-      subscription_session_id: sessionId,
-      payment_id: `AUTH_${uuid()}`,
+    // -------------------------
+    // Cashfree payload
+    // -------------------------
+    const payload = {
+      subscription_id: mandate.mandate_id,
+      subscription_session_id: mandate.subscription_session_id,
+      payment_id: authPaymentId,
       payment_type: 'AUTH',
-      payment_method: {
+      payment_schedule_date: mandate.subscription_first_charge_time,
+      payment_method: payment_method || {
         upi: { channel: 'link' }
       }
     };
 
     const headers = {
-      'x-api-version': API_VER,
+      'x-api-version': '2025-01-01',
       'x-partner-apikey': PARTNER_KEY,
       'x-partner-merchantid': merchantId,
-      'x-idempotency-key': uuid(),
+      'x-idempotency-key': authPaymentId,
       'Content-Type': 'application/json'
     };
 
-    let payResp;
-    try {
-      payResp = await axios.post(
-        `${PG_BASE}/subscriptions/pay`,
-        authPayload,
-        { headers }
-      );
-    } catch (cfErr) {
-      console.error('Cashfree AUTH failed', {
-        status: cfErr?.response?.status,
-        data: cfErr?.response?.data
-      });
-      return res.status(502).json({
-        error: 'cashfree_auth_failed',
-        cf_status: cfErr?.response?.status,
-        cf_error: cfErr?.response?.data
-      });
-    }
-
-    const payData = payResp.data;
-
-    const authUrl =
-      payData?.data?.url ||
-      'https://payments.cashfree.com/subscriptions/checkout/timer';
-
-    await logEvent('cashfree.mandate.auth_created', {
-      mandateDocId,
-      subscriptionId,
-      merchantId,
-      payment_id: authPayload.payment_id
-    });
-
-    return res.json({
-      ok: true,
-      subscription_id: subscriptionId,
-      cf_subscription_id: cfSubscriptionId,
-      auth_url: authUrl,
-      payment_status: payData.payment_status || 'PENDING'
-    });
-  } catch (err) {
-    console.error('/mandate/create-and-auth error', err);
-    return res.status(err.status || 500).json({
-      error: err.message || String(err)
-    });
-  }
-});
-
-
-/**
- * ----------------------------------------
- * POST /mandate/:subscriptionId/manage
- * ----------------------------------------
- */
-router.post('/:subscriptionId/manage', verifyFirebaseToken, async (req, res) => {
-  try {
-    const { subscriptionId } = req.params;
-    const { merchantId, action } = req.body;
-
-    if (!merchantId || !action) {
-      return res.status(400).json({ error: 'merchantId and action required' });
-    }
-
-    const resp = await axios.post(
-      `${process.env.PG_BASE || 'https://sandbox.cashfree.com/pg'}/subscriptions/${subscriptionId}/manage`,
-      { action },
-      {
-        headers: {
-          'x-api-version': API_VERSION,
-          'x-partner-apikey': PARTNER_KEY,
-          'x-partner-merchantid': merchantId,
-          'Content-Type': 'application/json'
-        }
-      }
+    // -------------------------
+    // Call Cashfree
+    // -------------------------
+    const cfResp = await axios.post(
+      `${PG_BASE}/subscriptions/pay`,
+      payload,
+      { headers }
     );
 
-    await logEvent('cashfree.mandate.manage', {
-      subscriptionId,
-      merchantId,
-      action
+    const data = cfResp.data;
+
+    // -------------------------
+    // Issue #6: single payload storage
+    // -------------------------
+    await mandateRef.set({
+      auth_payment_id: authPaymentId,
+      cf_payment_id: data.cf_payment_id || null,
+      payment_status: data.payment_status || 'PENDING',
+      payment_type: 'AUTH',
+      payment_method: data.payment_method || 'upi',
+      payment_channel: data.channel || null,
+      payment_payload: data, // single authoritative payment payload
+      failure_reason: data.failure_details?.failure_reason || null,
+      updated_at: FieldValue.serverTimestamp()
+    }, { merge: true });
+
+    // -------------------------
+    // API response
+    // -------------------------
+    return res.json({
+      payment_id: authPaymentId,
+      cf_payment_id: data.cf_payment_id,
+      payment_status: data.payment_status,
+      action: data.action,
+      channel: data.channel,
+      auth_data: data.data
     });
 
-    return res.json({
-      ok: true,
-      subscriptionId,
-      status: action === 'CANCEL' ? 'CANCELLED' : action
-    });
   } catch (err) {
-    console.error('/mandate/manage error', err);
-    return res.status(err.status || 500).json({
-      error: err.message || String(err)
+    console.error('Create Auth Error:', err?.response?.data || err);
+
+    return res.status(500).json({
+      error: 'Failed to create auth',
+      details: err?.response?.data || err.message
     });
   }
 });
