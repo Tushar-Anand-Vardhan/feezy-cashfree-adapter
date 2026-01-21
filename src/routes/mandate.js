@@ -16,6 +16,11 @@ const PG_BASE = process.env.PG_BASE || 'https://sandbox.cashfree.com/pg';
  * ------------------------------------------------
  */
 router.post('/create', verifyFirebaseToken, async (req, res) => {
+  return res.json({
+    hasUser: !!req.user,
+    user: req.user
+  });
+
   try {
     const {
       enrollmentId,
