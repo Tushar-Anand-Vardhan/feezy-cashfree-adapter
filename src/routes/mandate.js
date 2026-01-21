@@ -26,6 +26,7 @@ router.post('/create', verifyFirebaseToken, async (req, res) => {
       return_url
     } = req.body;
 
+    console.log("hello",req);
     const merchantId = req.user.merchant_id;
 
     // -------------------------
