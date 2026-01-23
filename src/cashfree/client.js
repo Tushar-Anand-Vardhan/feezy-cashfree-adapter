@@ -8,4 +8,12 @@ const instance = axios.create({
   timeout: 15000
 });
 
+instance.interceptors.request.use(req => {
+  console.log('[CF OUTGOING]', {
+    url: req.baseURL + req.url,
+    headers: req.headers
+  });
+  return req;
+});
+
 module.exports = instance;
