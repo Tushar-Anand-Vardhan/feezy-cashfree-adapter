@@ -6,7 +6,6 @@ const axios = require('axios');
 async function cashfreePartnerPost(path, body = {}, extraHeaders = {}) {
   const headers = { 
     'x-partner-apikey': PARTNER_KEY, 
-    'x-api-version': PG_API_VERSION,
     ...extraHeaders 
   };
   console.log('[CF REQUEST]', {
