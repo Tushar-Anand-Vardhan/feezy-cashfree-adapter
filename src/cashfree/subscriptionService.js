@@ -4,7 +4,11 @@ const { PARTNER_KEY, PG_BASE } = require('../config');
 const axios = require('axios');
 
 async function cashfreePartnerPost(path, body = {}, extraHeaders = {}) {
-  const headers = { 'x-partner-apikey': PARTNER_KEY, ...extraHeaders };
+  const headers = { 
+    'x-partner-apikey': PARTNER_KEY, 
+    'x-api-version': '2025-01-01',
+    ...extraHeaders 
+  };
   const url = path.startsWith('http') ? path : `${path.startsWith('/') ? '' : '/'}${path}`;
   const resp = await axiosInstance.post(url, body, { headers });
   return resp.data;
