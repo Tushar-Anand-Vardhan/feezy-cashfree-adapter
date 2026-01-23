@@ -1,12 +1,12 @@
 // src/cashfree/subscriptionService.js
 const axiosInstance = require('./client');
-const { PARTNER_KEY, PG_BASE } = require('../config');
+const { PARTNER_KEY, PG_BASE, PG_API_VERSION } = require('../config');
 const axios = require('axios');
 
 async function cashfreePartnerPost(path, body = {}, extraHeaders = {}) {
   const headers = { 
     'x-partner-apikey': PARTNER_KEY, 
-    'x-api-version': '2025-01-01',
+    'x-api-version': PG_API_VERSION,
     ...extraHeaders 
   };
   console.log('[CF REQUEST]', {
